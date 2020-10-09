@@ -1,12 +1,16 @@
+import pickle
+from os import path
 import concurrent
 import json
 import webbrowser
 from concurrent.futures.thread import ThreadPoolExecutor
 from datetime import datetime
 from time import sleep
+from urllib3 import Retry
 
 import browser_cookie3
 import requests
+from requests.adapters import HTTPAdapter
 from spinlog import Spinner
 
 from utils.http import TimeoutHTTPAdapter
@@ -46,6 +50,49 @@ DEFAULT_HEADERS = {
 }
 CART_SUCCESS_CODES = {201, requests.codes.ok}
 
+PRECEDING_IN_STOCK_EXC = -1
+PRECEDING_IN_STOCK_RESP = None
+
+VPN_ADDRESSES = (
+    'it197.nordvpn.com',
+)
+
+RESP_DIR = path.abspath(path.join(path.dirname(__file__), '..', 'stores_responses'))
+assert path.isdir(RESP_DIR), f'Resp dir {RESP_DIR} not a dir or does not exist'
+
+
+def _compare_responses(r1, r2):
+    if isinstance(r1, requests.models.Response) and isinstance(r1, requests.models.Response):
+        return r1.status_code != r2.status_code
+    else:
+        return r1 != r2
+
+
+def _notify_api_change(notification_handler, new_resp):
+    info = f'Status code: {new_resp.status_code}' if not isinstance(new_resp, Exception) else 'Exception'
+    notification_handler.send_notification(
+        f"Response from Nvidia API has changed. {info}"
+    )
+
+
+def _log_response(new_resp, is_exc):
+    curdt = datetime.now().strftime("%Y-%m-%d_%H-%M-%S-%f")
+    suffix = '_exception' if is_exc else f'_{new_resp.status_code}'
+    json_filename = f'nvidia_{curdt}_response{suffix}.json'
+    pickle_filename = f'nvidia_{curdt}_response{suffix}.pickle'
+    try:
+        jresp = new_resp.json()
+    except:
+        jresp = None
+
+    with open(path.join(RESP_DIR, json_filename), 'w') as f:
+        if not is_exc:
+            json.dump({'status_code': new_resp.status_code, 'response_text': new_resp.text, 'response_json': jresp}, f)
+        else:
+            json.dump({'class_name': str(type(new_resp)), 'message': str(new_resp)}, f)
+    with open(path.join(RESP_DIR, pickle_filename), 'wb') as f:
+        pickle.dump(new_resp, f)
+
 
 class ProductIDChangedException(Exception):
     def __init__(self):
@@ -81,7 +128,7 @@ class NvidiaBuyer:
         if type(self.auto_buy_enabled) != bool:
             self.auto_buy_enabled = False
 
-        adapter = TimeoutHTTPAdapter()
+        adapter = TimeoutHTTPAdapter(timeout=60, max_retries=Retry(0))
         self.session.mount("https://", adapter)
         self.session.mount("http://", adapter)
         self.notification_handler = notification_handler
@@ -158,6 +205,7 @@ class NvidiaBuyer:
             self.buy(product_id)
 
     def is_in_stock(self, product_id):
+        global PRECEDING_IN_STOCK_RESP
         try:
             response = self.session.get(
                 NVIDIA_STOCK_API.format(
@@ -169,6 +217,10 @@ class NvidiaBuyer:
                 headers=DEFAULT_HEADERS,
             )
             log.debug(f"Stock check response code: {response.status_code}")
+            if _compare_responses(PRECEDING_IN_STOCK_RESP, response):
+                _notify_api_change(self.notification_handler, response)
+                _log_response(response, False)
+            PRECEDING_IN_STOCK_RESP = response
             if response.status_code != 200:
                 log.debug(response.text)
             if "PRODUCT_INVENTORY_IN_STOCK" in response.text:
@@ -176,6 +228,10 @@ class NvidiaBuyer:
             else:
                 return False
         except requests.exceptions.RequestException as e:
+            if _compare_responses(PRECEDING_IN_STOCK_RESP, PRECEDING_IN_STOCK_EXC):
+                _notify_api_change(self.notification_handler, e)
+                _log_response(e, True)
+            PRECEDING_IN_STOCK_RESP = PRECEDING_IN_STOCK_EXC
             log.info(
                 f"Got an unexpected reply from the server, API may be down, nothing we can do but try again"
             )
