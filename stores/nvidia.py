@@ -7,6 +7,7 @@ from concurrent.futures.thread import ThreadPoolExecutor
 from datetime import datetime
 from time import sleep
 from urllib3 import Retry
+from random import randint
 
 import browser_cookie3
 import requests
@@ -53,9 +54,17 @@ CART_SUCCESS_CODES = {201, requests.codes.ok}
 PRECEDING_IN_STOCK_EXC = -1
 PRECEDING_IN_STOCK_RESP = None
 
+VPN_USER = 'antonio.farina%40gmail.com'
+VPN_PASSW = 'ParamiIlCulo1%24'
+
 VPN_ADDRESSES = (
     'it197.nordvpn.com',
 )
+
+PROXIES = [
+    {'http': proxy, 'https': proxy}
+    for proxy in ['{u}:{p}@{addr}'.format(u=VPN_USER, p=VPN_PASSW, addr=addr) for addr in VPN_ADDRESSES]
+]
 
 RESP_DIR = path.abspath(path.join(path.dirname(__file__), '..', 'stores_responses'))
 assert path.isdir(RESP_DIR), f'Resp dir {RESP_DIR} not a dir or does not exist'
@@ -112,7 +121,7 @@ class NvidiaBuyer:
         self.locale = self.map_locales()
         self.session = requests.Session()
         self.gpu = gpu
-        self.enabled = True
+        self.enabled = False
         self.auto_buy_enabled = False
         self.attempt = 0
         self.started_at = datetime.now()
@@ -208,13 +217,19 @@ class NvidiaBuyer:
         global PRECEDING_IN_STOCK_RESP
         try:
             response = self.session.get(
+                "https://api.myip.com",
+                proxies=PROXIES[randint(0, len(PROXIES) - 1)] if len(PROXIES) else {},
+            )
+            response = self.session.get(
                 NVIDIA_STOCK_API.format(
                     product_id=product_id,
                     locale=self.locale,
                     currency=CURRENCY_LOCALE_MAP.get(self.locale, "USD"),
                     cookies=self.cj,
+
                 ),
                 headers=DEFAULT_HEADERS,
+                proxies=PROXIES,
             )
             log.debug(f"Stock check response code: {response.status_code}")
             if _compare_responses(PRECEDING_IN_STOCK_RESP, response):
@@ -236,6 +251,8 @@ class NvidiaBuyer:
                 f"Got an unexpected reply from the server, API may be down, nothing we can do but try again"
             )
             return False
+        except Exception as e:
+            pass
 
     def add_to_cart(self, product_id):
         try:
